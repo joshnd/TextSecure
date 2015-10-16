@@ -22,6 +22,7 @@ import android.database.Cursor;
 import android.database.MergeCursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.net.Uri;
 import android.support.annotation.Nullable;
 import android.text.TextUtils;
 import android.util.Log;
@@ -29,8 +30,11 @@ import android.util.Log;
 import org.thoughtcrime.securesms.R;
 import org.thoughtcrime.securesms.crypto.MasterCipher;
 import org.thoughtcrime.securesms.database.model.DisplayRecord;
+import org.thoughtcrime.securesms.database.model.MediaMmsMessageRecord;
 import org.thoughtcrime.securesms.database.model.MessageRecord;
 import org.thoughtcrime.securesms.database.model.ThreadRecord;
+import org.thoughtcrime.securesms.mms.Slide;
+import org.thoughtcrime.securesms.mms.SlideDeck;
 import org.thoughtcrime.securesms.recipients.Recipient;
 import org.thoughtcrime.securesms.recipients.RecipientFactory;
 import org.thoughtcrime.securesms.recipients.Recipients;
@@ -42,8 +46,11 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
 
 public class ThreadDatabase extends Database {
+
+  private static final String TAG = ThreadDatabase.class.getSimpleName();
 
           static final String TABLE_NAME      = "thread";
   public  static final String ID              = "_id";
@@ -55,14 +62,14 @@ public class ThreadDatabase extends Database {
   public  static final String READ            = "read";
   private static final String TYPE            = "type";
   private static final String ERROR           = "error";
-  private static final String HAS_ATTACHMENT  = "has_attachment";
   public  static final String SNIPPET_TYPE    = "snippet_type";
+  private static final String SNIPPET_URI     = "snippet_uri";
 
   public static final String CREATE_TABLE = "CREATE TABLE " + TABLE_NAME + " (" + ID + " INTEGER PRIMARY KEY, "                             +
     DATE + " INTEGER DEFAULT 0, " + MESSAGE_COUNT + " INTEGER DEFAULT 0, "                         +
     RECIPIENT_IDS + " TEXT, " + SNIPPET + " TEXT, " + SNIPPET_CHARSET + " INTEGER DEFAULT 0, "     +
     READ + " INTEGER DEFAULT 1, " + TYPE + " INTEGER DEFAULT 0, " + ERROR + " INTEGER DEFAULT 0, " +
-    SNIPPET_TYPE + " INTEGER DEFAULT 0);";
+    SNIPPET_TYPE + " INTEGER DEFAULT 0, " + SNIPPET_URI + " TEXT DEFAULT NULL);";
 
   public static final String[] CREATE_INDEXS = {
     "CREATE INDEX IF NOT EXISTS thread_recipient_ids_index ON " + TABLE_NAME + " (" + RECIPIENT_IDS + ");",
@@ -73,7 +80,7 @@ public class ThreadDatabase extends Database {
   }
 
   private long[] getRecipientIds(Recipients recipients) {
-    Set<Long>       recipientSet  = new HashSet<Long>();
+    Set<Long>       recipientSet  = new HashSet<>();
     List<Recipient> recipientList = recipients.getRecipientsList();
 
     for (Recipient recipient : recipientList) {
@@ -118,12 +125,13 @@ public class ThreadDatabase extends Database {
     return db.insert(TABLE_NAME, null, contentValues);
   }
 
-  private void updateThread(long threadId, long count, String body, long date, long type)
+  private void updateThread(long threadId, long count, String body, @Nullable Uri attachment, long date, long type)
   {
     ContentValues contentValues = new ContentValues(4);
     contentValues.put(DATE, date - date % 1000);
     contentValues.put(MESSAGE_COUNT, count);
     contentValues.put(SNIPPET, body);
+    contentValues.put(SNIPPET_URI, attachment == null ? null : attachment.toString());
     contentValues.put(SNIPPET_TYPE, type);
 
     SQLiteDatabase db = databaseHelper.getWritableDatabase();
@@ -131,12 +139,13 @@ public class ThreadDatabase extends Database {
     notifyConversationListListeners();
   }
 
-  public void updateSnippet(long threadId, String snippet, long date, long type) {
+  public void updateSnippet(long threadId, String snippet, @Nullable Uri attachment, long date, long type) {
     ContentValues contentValues = new ContentValues(3);
 
     contentValues.put(DATE, date - date % 1000);
     contentValues.put(SNIPPET, snippet);
     contentValues.put(SNIPPET_TYPE, type);
+    contentValues.put(SNIPPET_URI, attachment == null ? null : attachment.toString());
     SQLiteDatabase db = databaseHelper.getWritableDatabase();
     db.update(TABLE_NAME, contentValues, ID + " = ?", new String[] {threadId + ""});
     notifyConversationListListeners();
@@ -144,7 +153,7 @@ public class ThreadDatabase extends Database {
 
   private void deleteThread(long threadId) {
     SQLiteDatabase db = databaseHelper.getWritableDatabase();
-    db.delete(TABLE_NAME, ID_WHERE, new String[] {threadId+""});
+    db.delete(TABLE_NAME, ID_WHERE, new String[] {threadId + ""});
     notifyConversationListListeners();
   }
 
@@ -247,7 +256,7 @@ public class ThreadDatabase extends Database {
     contentValues.put(READ, 0);
 
     SQLiteDatabase db = databaseHelper.getWritableDatabase();
-    db.update(TABLE_NAME, contentValues, ID_WHERE, new String[] {threadId+""});
+    db.update(TABLE_NAME, contentValues, ID_WHERE, new String[] {threadId + ""});
     notifyConversationListListeners();
   }
 
@@ -256,7 +265,7 @@ public class ThreadDatabase extends Database {
     contentValues.put(TYPE, distributionType);
 
     SQLiteDatabase db = databaseHelper.getWritableDatabase();
-    db.update(TABLE_NAME, contentValues, ID_WHERE, new String[] {threadId+""});
+    db.update(TABLE_NAME, contentValues, ID_WHERE, new String[] {threadId + ""});
     notifyConversationListListeners();
   }
 
@@ -413,7 +422,7 @@ public class ThreadDatabase extends Database {
         if (record.isPush()) timestamp = record.getDateSent();
         else                 timestamp = record.getDateReceived();
 
-        updateThread(threadId, count, record.getBody().getBody(), timestamp, record.getType());
+        updateThread(threadId, count, record.getBody().getBody(), getAttachmentUriFor(record), timestamp, record.getType());
         notifyConversationListListeners();
         return false;
       } else {
@@ -424,6 +433,20 @@ public class ThreadDatabase extends Database {
     } finally {
       if (reader != null)
         reader.close();
+    }
+  }
+
+  private @Nullable Uri getAttachmentUriFor(MessageRecord record) {
+    try {
+      if (!record.isMms() || record.isMmsNotification()) return null;
+
+      SlideDeck slideDeck = ((MediaMmsMessageRecord)record).getSlideDeckFuture().get();
+      Slide     thumbnail = slideDeck.getThumbnailSlide();
+
+      return thumbnail != null ? thumbnail.getThumbnailUri() : null;
+    } catch (InterruptedException | ExecutionException e) {
+      Log.w(TAG, e);
+      return null;
     }
   }
 
@@ -459,9 +482,9 @@ public class ThreadDatabase extends Database {
     }
 
     public ThreadRecord getCurrent() {
-      long threadId         = cursor.getLong(cursor.getColumnIndexOrThrow(ThreadDatabase.ID));
-      String recipientId    = cursor.getString(cursor.getColumnIndexOrThrow(ThreadDatabase.RECIPIENT_IDS));
-      Recipients recipients = RecipientFactory.getRecipientsForIds(context, recipientId, true);
+      long       threadId    = cursor.getLong(cursor.getColumnIndexOrThrow(ThreadDatabase.ID));
+      String     recipientId = cursor.getString(cursor.getColumnIndexOrThrow(ThreadDatabase.RECIPIENT_IDS));
+      Recipients recipients  = RecipientFactory.getRecipientsForIds(context, recipientId, true);
 
       DisplayRecord.Body body = getPlaintextBody(cursor);
       long date               = cursor.getLong(cursor.getColumnIndexOrThrow(ThreadDatabase.DATE));
@@ -469,8 +492,9 @@ public class ThreadDatabase extends Database {
       long read               = cursor.getLong(cursor.getColumnIndexOrThrow(ThreadDatabase.READ));
       long type               = cursor.getLong(cursor.getColumnIndexOrThrow(ThreadDatabase.SNIPPET_TYPE));
       int distributionType    = cursor.getInt(cursor.getColumnIndexOrThrow(ThreadDatabase.TYPE));
+      Uri snippetUri          = getSnippetUri(cursor);
 
-      return new ThreadRecord(context, body, recipients, date, count,
+      return new ThreadRecord(context, body, snippetUri, recipients, date, count,
                               read == 1, threadId, type, distributionType);
     }
 
@@ -489,6 +513,19 @@ public class ThreadDatabase extends Database {
       } catch (InvalidMessageException e) {
         Log.w("ThreadDatabase", e);
         return new DisplayRecord.Body(context.getString(R.string.ThreadDatabase_error_decrypting_message), true);
+      }
+    }
+
+    private @Nullable Uri getSnippetUri(Cursor cursor) {
+      if (cursor.isNull(cursor.getColumnIndexOrThrow(ThreadDatabase.SNIPPET_URI))) {
+        return null;
+      }
+
+      try {
+        return Uri.parse(cursor.getString(cursor.getColumnIndexOrThrow(ThreadDatabase.SNIPPET_URI)));
+      } catch (IllegalArgumentException e) {
+        Log.w(TAG, e);
+        return null;
       }
     }
 
