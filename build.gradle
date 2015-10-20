@@ -2,16 +2,23 @@ buildscript {
     repositories {
         maven {
             url "https://repo1.maven.org/maven2"
+            url "https://raw.githubusercontent.com/Tubebaum/maven-repo/master/"            
         }
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:1.2.3'
+        classpath 'com.nimbledroid:gradle-profiler:1.0'
         classpath files('libs/gradle-witness.jar')
     }
 }
 
 apply plugin: 'com.android.application'
 apply plugin: 'witness'
+apply plugin: 'com.nimbledroid.profiler'
+
+nimbledroid {
+    apiKey "$System.env.NIMBLE_KEY"
+}
 
 repositories {
     maven {
