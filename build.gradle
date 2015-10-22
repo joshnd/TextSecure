@@ -13,12 +13,12 @@ buildscript {
     }
 }
 
-apply plugin: 'com.android.application'
-apply plugin: 'witness'
-
 plugins {
   id "com.nimbledroid.profiler" version "1.0"
 }
+
+apply plugin: 'com.android.application'
+apply plugin: 'witness'
 
 nimbledroid {
     apiKey "$System.env.NIMBLE_KEY"
